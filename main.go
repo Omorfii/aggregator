@@ -20,7 +20,7 @@ type command struct {
 func handlerLogin(s *state, cmd command) error {
 
 	if len(cmd.arguments) <= 0 {
-		return fmt.Errorf("No username given")
+		return fmt.Errorf("no username given")
 	}
 
 	firstArgument := cmd.arguments[0]
@@ -45,7 +45,7 @@ func (c *commands) run(s *state, cmd command) error {
 	if exists {
 		return function(s, cmd)
 	} else {
-		return fmt.Errorf("Command not found")
+		return fmt.Errorf("command not found")
 	}
 
 }
