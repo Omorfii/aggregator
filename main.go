@@ -1,14 +1,22 @@
 package main
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/Omorfii/aggregator/internal/config"
+	"github.com/Omorfii/aggregator/internal/database"
+	"github.com/google/uuid"
+	_ "github.com/lib/pq"
 )
 
 type state struct {
+	db  *database.Queries
 	cfg *config.Config
 }
 
@@ -25,12 +33,88 @@ func handlerLogin(s *state, cmd command) error {
 
 	firstArgument := cmd.arguments[0]
 
-	err := s.cfg.SetUser(firstArgument)
+	_, err := s.db.GetUser(context.Background(), firstArgument)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("user does not exist")
+		}
+		return err
+	}
+
+	err = s.cfg.SetUser(firstArgument)
 	if err != nil {
 		return err
 	}
 
 	fmt.Println("User has been set")
+
+	return nil
+}
+
+func handlerRegister(s *state, cmd command) error {
+
+	if len(cmd.arguments) <= 0 {
+		return fmt.Errorf("no username given")
+	}
+
+	firstArgument := cmd.arguments[0]
+
+	_, err := s.db.GetUser(context.Background(), firstArgument)
+	if err == nil {
+		return fmt.Errorf("user already exist")
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	uuid := uuid.New()
+
+	parameters := database.CreateUserParams{
+		ID:        uuid,
+		Name:      firstArgument,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	user, err := s.db.CreateUser(context.Background(), parameters)
+	if err != nil {
+		return err
+	}
+
+	err = s.cfg.SetUser(firstArgument)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("User was created: %+v\n", user)
+
+	return nil
+}
+
+func handlerReset(s *state, cmd command) error {
+
+	err := s.db.DeleteAllUsers(context.Background())
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("All users have been deleted\n")
+	return nil
+}
+
+func handlerUsers(s *state, cmd command) error {
+
+	users, err := s.db.GetUsers(context.Background())
+	if err != nil {
+		return err
+	}
+
+	for i := 0; i < len(users); i++ {
+		if users[i].Name == s.cfg.CurrentUser {
+			fmt.Printf("%v (current)\n", users[i].Name)
+		} else {
+			fmt.Printf("%v\n", users[i].Name)
+		}
+	}
 
 	return nil
 }
@@ -66,7 +150,16 @@ func main() {
 		log.Fatal(err)
 	}
 
+	db, err := sql.Open("postgres", cfg.Url)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	dbQueries := database.New(db)
+
 	currentConfig := state{
+		db:  dbQueries,
 		cfg: &cfg,
 	}
 
@@ -75,6 +168,9 @@ func main() {
 	}
 
 	currentCommands.register("login", handlerLogin)
+	currentCommands.register("register", handlerRegister)
+	currentCommands.register("reset", handlerReset)
+	currentCommands.register("users", handlerUsers)
 
 	arguments := os.Args
 
