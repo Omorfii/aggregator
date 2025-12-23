@@ -3,9 +3,13 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"html"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"time"
 
@@ -23,6 +27,62 @@ type state struct {
 type command struct {
 	name      string
 	arguments []string
+}
+
+type RSSFeed struct {
+	Channel struct {
+		Title       string    `xml:"title"`
+		Link        string    `xml:"link"`
+		Description string    `xml:"description"`
+		Item        []RSSItem `xml:"item"`
+	} `xml:"channel"`
+}
+
+type RSSItem struct {
+	Title       string `xml:"title"`
+	Link        string `xml:"link"`
+	Description string `xml:"description"`
+	PubDate     string `xml:"pubDate"`
+}
+
+func fetchFeed(ctx context.Context, feedURL string) (*RSSFeed, error) {
+
+	req, err := http.NewRequestWithContext(ctx, "GET", feedURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("User-Agent", "gator")
+
+	client := &http.Client{}
+
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	defer res.Body.Close()
+
+	byt, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var feed RSSFeed
+
+	if err = xml.Unmarshal(byt, &feed); err != nil {
+		return nil, err
+	}
+
+	feed.Channel.Title = html.UnescapeString(feed.Channel.Title)
+	feed.Channel.Description = html.UnescapeString(feed.Channel.Description)
+
+	for i, item := range feed.Channel.Item {
+		feed.Channel.Item[i].Title = html.UnescapeString(item.Title)
+		feed.Channel.Item[i].Description = html.UnescapeString(item.Description)
+	}
+
+	return &feed, nil
 }
 
 func handlerLogin(s *state, cmd command) error {
@@ -119,6 +179,80 @@ func handlerUsers(s *state, cmd command) error {
 	return nil
 }
 
+func handlerAgg(_ *state, _ command) error {
+
+	feed, err := fetchFeed(context.Background(), "https://www.wagslane.dev/index.xml")
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("%+v\n", feed)
+	return nil
+}
+
+func handlerAddFeed(s *state, cmd command) error {
+
+	if len(cmd.arguments) <= 0 {
+		return fmt.Errorf("no feed name and url given")
+	}
+
+	if len(cmd.arguments) == 1 {
+		return fmt.Errorf("no url given")
+	}
+
+	firstArgument := cmd.arguments[0]
+	secondArgument := cmd.arguments[1]
+
+	curentUserName := s.cfg.CurrentUser
+
+	curentUser, err := s.db.GetUser(context.Background(), curentUserName)
+	if err != nil {
+		return err
+	}
+
+	uuid := uuid.New()
+
+	parameters := database.CreateFeedParams{
+		ID:        uuid,
+		Name:      firstArgument,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Url:       secondArgument,
+		UserID:    curentUser.ID,
+	}
+
+	feed, err := s.db.CreateFeed(context.Background(), parameters)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Feed was created: %+v\n", feed)
+
+	return nil
+}
+
+func handlerFeeds(s *state, _ command) error {
+
+	feeds, err := s.db.GetFeeds(context.Background())
+	if err != nil {
+		return err
+	}
+
+	for _, feed := range feeds {
+
+		creator, err := s.db.GetUserFromID(context.Background(), feed.UserID)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Feed name: %v\n", feed.Name)
+		fmt.Printf("Feed url: %v\n", feed.Url)
+		fmt.Printf("User that created the feed: %v\n", creator)
+	}
+
+	return nil
+}
+
 type commands struct {
 	handlers map[string]func(*state, command) error
 }
@@ -171,6 +305,9 @@ func main() {
 	currentCommands.register("register", handlerRegister)
 	currentCommands.register("reset", handlerReset)
 	currentCommands.register("users", handlerUsers)
+	currentCommands.register("agg", handlerAgg)
+	currentCommands.register("addfeed", handlerAddFeed)
+	currentCommands.register("feeds", handlerFeeds)
 
 	arguments := os.Args
 
