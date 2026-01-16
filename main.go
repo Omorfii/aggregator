@@ -190,7 +190,7 @@ func handlerAgg(_ *state, _ command) error {
 	return nil
 }
 
-func handlerAddFeed(s *state, cmd command) error {
+func handlerAddFeed(s *state, cmd command, user database.User) error {
 
 	if len(cmd.arguments) <= 0 {
 		return fmt.Errorf("no feed name and url given")
@@ -203,13 +203,6 @@ func handlerAddFeed(s *state, cmd command) error {
 	firstArgument := cmd.arguments[0]
 	secondArgument := cmd.arguments[1]
 
-	curentUserName := s.cfg.CurrentUser
-
-	curentUser, err := s.db.GetUser(context.Background(), curentUserName)
-	if err != nil {
-		return err
-	}
-
 	newFeedID := uuid.New()
 
 	parameters := database.CreateFeedParams{
@@ -218,7 +211,7 @@ func handlerAddFeed(s *state, cmd command) error {
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 		Url:       secondArgument,
-		UserID:    curentUser.ID,
+		UserID:    user.ID,
 	}
 
 	feed, err := s.db.CreateFeed(context.Background(), parameters)
@@ -230,7 +223,7 @@ func handlerAddFeed(s *state, cmd command) error {
 		ID:        uuid.New(),
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
-		UserID:    curentUser.ID,
+		UserID:    user.ID,
 		FeedID:    newFeedID,
 	}
 
@@ -266,19 +259,13 @@ func handlerFeeds(s *state, _ command) error {
 	return nil
 }
 
-func handlerFollow(s *state, cmd command) error {
+func handlerFollow(s *state, cmd command, user database.User) error {
 
 	if len(cmd.arguments) <= 0 {
 		return fmt.Errorf("no feed url given")
 	}
 
 	firstArgument := cmd.arguments[0]
-	curentUserName := s.cfg.CurrentUser
-
-	curentUser, err := s.db.GetUser(context.Background(), curentUserName)
-	if err != nil {
-		return err
-	}
 
 	feedFromURL, err := s.db.GetFeed(context.Background(), firstArgument)
 	if err != nil {
@@ -291,7 +278,7 @@ func handlerFollow(s *state, cmd command) error {
 		ID:        uuid,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
-		UserID:    curentUser.ID,
+		UserID:    user.ID,
 		FeedID:    feedFromURL.ID,
 	}
 
@@ -305,16 +292,9 @@ func handlerFollow(s *state, cmd command) error {
 	return nil
 }
 
-func handlerFollowing(s *state, _ command) error {
+func handlerFollowing(s *state, _ command, user database.User) error {
 
-	curentUserName := s.cfg.CurrentUser
-
-	curentUser, err := s.db.GetUser(context.Background(), curentUserName)
-	if err != nil {
-		return err
-	}
-
-	feedsFollowed, err := s.db.GetFeedFollowsForUser(context.Background(), curentUser.ID)
+	feedsFollowed, err := s.db.GetFeedFollowsForUser(context.Background(), user.ID)
 	if err != nil {
 		return err
 	}
@@ -330,6 +310,42 @@ func handlerFollowing(s *state, _ command) error {
 	}
 
 	return nil
+}
+
+func handlerUnfollow(s *state, cmd command, user database.User) error {
+
+	if len(cmd.arguments) <= 0 {
+		return fmt.Errorf("no feed url given")
+	}
+
+	firstArgument := cmd.arguments[0]
+
+	feedFromURL, err := s.db.GetFeed(context.Background(), firstArgument)
+	if err != nil {
+		return err
+	}
+
+	parameter := database.UnfollowFeedParams{
+		UserID: user.ID,
+		FeedID: feedFromURL.ID,
+	}
+
+	return s.db.UnfollowFeed(context.Background(), parameter)
+}
+
+func middlewareLoggedIn(handler func(s *state, cmd command, user database.User) error) func(*state, command) error {
+
+	return func(s *state, cmd command) error {
+
+		curentUserName := s.cfg.CurrentUser
+
+		curentUser, err := s.db.GetUser(context.Background(), curentUserName)
+		if err != nil {
+			return err
+		}
+
+		return handler(s, cmd, curentUser)
+	}
 }
 
 type commands struct {
@@ -385,10 +401,11 @@ func main() {
 	currentCommands.register("reset", handlerReset)
 	currentCommands.register("users", handlerUsers)
 	currentCommands.register("agg", handlerAgg)
-	currentCommands.register("addfeed", handlerAddFeed)
+	currentCommands.register("addfeed", middlewareLoggedIn(handlerAddFeed))
 	currentCommands.register("feeds", handlerFeeds)
-	currentCommands.register("follow", handlerFollow)
-	currentCommands.register("following", handlerFollowing)
+	currentCommands.register("follow", middlewareLoggedIn(handlerFollow))
+	currentCommands.register("following", middlewareLoggedIn(handlerFollowing))
+	currentCommands.register("unfollow", middlewareLoggedIn(handlerUnfollow))
 
 	arguments := os.Args
 
