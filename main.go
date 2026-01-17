@@ -11,6 +11,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Omorfii/aggregator/internal/config"
@@ -179,15 +181,30 @@ func handlerUsers(s *state, cmd command) error {
 	return nil
 }
 
-func handlerAgg(_ *state, _ command) error {
+func handlerAgg(s *state, cmd command) error {
 
-	feed, err := fetchFeed(context.Background(), "https://www.wagslane.dev/index.xml")
-	if err != nil {
-		return err
+	if len(cmd.arguments) <= 0 {
+		return fmt.Errorf("no time given")
 	}
 
-	fmt.Printf("%+v\n", feed)
-	return nil
+	firstArgument := cmd.arguments[0]
+
+	timeDuration, err := time.ParseDuration(firstArgument)
+	if err != nil {
+		return nil
+	}
+
+	fmt.Printf("Collecting feeds every %v\n", timeDuration)
+
+	ticker := time.NewTicker(timeDuration)
+	for ; ; <-ticker.C {
+		err := scrapeFeeds(s, cmd)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("scrapeFeeds success\n")
+	}
+
 }
 
 func handlerAddFeed(s *state, cmd command, user database.User) error {
@@ -333,6 +350,100 @@ func handlerUnfollow(s *state, cmd command, user database.User) error {
 	return s.db.UnfollowFeed(context.Background(), parameter)
 }
 
+func scrapeFeeds(s *state, _ command) error {
+
+	feedFetched, err := s.db.GetNextFeedToFetch(context.Background())
+	if err != nil {
+		return err
+	}
+
+	err = s.db.MarkFeedFetched(context.Background(), feedFetched.ID)
+	if err != nil {
+		return err
+	}
+
+	rssFeed, err := fetchFeed(context.Background(), feedFetched.Url)
+	if err != nil {
+		return err
+	}
+
+	var pubdate sql.NullTime
+
+	for _, item := range rssFeed.Channel.Item {
+
+		description := sql.NullString{
+			String: item.Description,
+			Valid:  item.Description != "",
+		}
+
+		pubtime, err := time.Parse(time.RFC1123Z, item.PubDate)
+		if err != nil {
+			pubdate = sql.NullTime{
+				Time:  time.Time{},
+				Valid: false,
+			}
+		} else {
+			pubdate = sql.NullTime{
+				Time:  pubtime,
+				Valid: true,
+			}
+		}
+
+		parameter := database.CreatePostParams{
+			ID:          uuid.New(),
+			Title:       item.Title,
+			Url:         item.Link,
+			Description: description,
+			PublishedAt: pubdate,
+			FeedID:      feedFetched.ID,
+		}
+
+		post, err := s.db.CreatePost(context.Background(), parameter)
+		if err != nil {
+			if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "UNIQUE constraint") {
+				continue
+			}
+			return err
+		}
+
+		fmt.Printf("post successfully created: %v", post)
+
+	}
+
+	return nil
+}
+
+func handlerBrowse(s *state, cmd command, user database.User) error {
+
+	var arg int32
+
+	if len(cmd.arguments) <= 0 {
+		arg = 2
+	} else {
+		val, err := strconv.Atoi(cmd.arguments[0])
+		if err != nil {
+			return err
+		}
+		arg = int32(val)
+	}
+
+	parameter := database.GetPostsForUserParams{
+		UserID: user.ID,
+		Limit:  arg,
+	}
+
+	posts, err := s.db.GetPostsForUser(context.Background(), parameter)
+	if err != nil {
+		return nil
+	}
+
+	for _, post := range posts {
+		fmt.Printf("%v\n", post)
+	}
+
+	return nil
+}
+
 func middlewareLoggedIn(handler func(s *state, cmd command, user database.User) error) func(*state, command) error {
 
 	return func(s *state, cmd command) error {
@@ -406,6 +517,7 @@ func main() {
 	currentCommands.register("follow", middlewareLoggedIn(handlerFollow))
 	currentCommands.register("following", middlewareLoggedIn(handlerFollowing))
 	currentCommands.register("unfollow", middlewareLoggedIn(handlerUnfollow))
+	currentCommands.register("browse", middlewareLoggedIn(handlerBrowse))
 
 	arguments := os.Args
 
